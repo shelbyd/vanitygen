@@ -15,7 +15,7 @@ struct Options {
     prefix: String,
 
     #[structopt(long, help = "Should we check for case")]
-    case_sensitive: bool,
+    only_case_sensitive: bool,
 }
 
 impl Options {
@@ -39,25 +39,37 @@ impl Options {
     }
 
     pub fn is_better(&self, new: &str, old: &str) -> bool {
-        if self.prefix_match(new) > self.prefix_match(old) {
-            return true;
+        match self.loose_prefix_match(new).cmp(&self.loose_prefix_match(old)) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {},
+        }
+
+        match self.match_count(new).cmp(&self.match_count(old)) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {},
         }
 
         false
     }
 
-    fn prefix_match(&self, other: &str) -> usize {
-        if self.case_sensitive {
+    fn loose_prefix_match(&self, other: &str) -> usize {
+        if self.only_case_sensitive {
             matching_prefix_length(&self.prefix, other)
         } else {
             matching_prefix_length(&self.prefix.to_lowercase(), &other.to_lowercase())
         }
     }
 
+    fn match_count(&self, other: &str) -> usize {
+        self.prefix.chars().zip(other.chars()).filter(|(a, b)| a == b).count()
+    }
+
     fn is_perfect_match(&self, candidate: &Option<Candidate>) -> bool {
         match candidate {
             None => false,
-            Some(c) => self.prefix_match(&c.address) == self.prefix.len(),
+            Some(c) => c.address.starts_with(&self.prefix),
         }
     }
 }
