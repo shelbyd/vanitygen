@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 concread = "0.2.16"
 hex = "0.4.3"
+rand = "0.8.4"
 rayon = "1.5.1"
 structopt = "0.3.22"
 sp-core = "^3.0.0"

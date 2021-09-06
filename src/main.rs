@@ -1,4 +1,5 @@
 use concread::CowCell;
+use rand::Rng;
 use rayon::iter::ParallelIterator;
 use sp_core::{
     crypto::{AccountId32, Ss58AddressFormat, Ss58Codec},
@@ -14,6 +15,9 @@ struct Options {
     #[structopt(long, help = "Desired prefix of the address")]
     prefix: String,
 
+    #[structopt(long, help = "Prefix for the secret seed", default_value = "//")]
+    seed_prefix: String,
+
     #[structopt(long, help = "Should we check for case")]
     only_case_sensitive: bool,
 }
@@ -23,11 +27,11 @@ impl Options {
         AccountId32::from(pair.public()).to_ss58check_with_version(Ss58AddressFormat::Custom(42))
     }
 
-    pub fn to_candidate(&self, (pair, secret): (Pair, Secret)) -> Candidate {
+    pub fn to_candidate(&self, (pair, seed): (Pair, String)) -> Candidate {
         Candidate {
             address: self.address(&pair),
             pair,
-            secret,
+            seed,
         }
     }
 
@@ -39,16 +43,19 @@ impl Options {
     }
 
     pub fn is_better(&self, new: &str, old: &str) -> bool {
-        match self.loose_prefix_match(new).cmp(&self.loose_prefix_match(old)) {
+        match self
+            .loose_prefix_match(new)
+            .cmp(&self.loose_prefix_match(old))
+        {
             std::cmp::Ordering::Greater => return true,
             std::cmp::Ordering::Less => return false,
-            std::cmp::Ordering::Equal => {},
+            std::cmp::Ordering::Equal => {}
         }
 
         match self.match_count(new).cmp(&self.match_count(old)) {
             std::cmp::Ordering::Greater => return true,
             std::cmp::Ordering::Less => return false,
-            std::cmp::Ordering::Equal => {},
+            std::cmp::Ordering::Equal => {}
         }
 
         false
@@ -63,7 +70,11 @@ impl Options {
     }
 
     fn match_count(&self, other: &str) -> usize {
-        self.prefix.chars().zip(other.chars()).filter(|(a, b)| a == b).count()
+        self.prefix
+            .chars()
+            .zip(other.chars())
+            .filter(|(a, b)| a == b)
+            .count()
     }
 
     fn is_perfect_match(&self, candidate: &Option<Candidate>) -> bool {
@@ -77,8 +88,6 @@ impl Options {
 fn matching_prefix_length(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(a, b)| a == b).count()
 }
-
-type Secret = [u8; 32];
 
 fn main() {
     let options = Arc::new(Options::from_args());
@@ -97,7 +106,14 @@ fn main() {
                     false => Some(()),
                 })
                 .while_some()
-                .map(|_| Pair::generate())
+                .map(|_| {
+                    let mut secret = [0; 32];
+                    rand::thread_rng().fill(&mut secret);
+                    let seed = format!("{}/{}", options.seed_prefix, hex::encode(secret));
+
+                    let pair = Pair::from_string(&seed, None).unwrap();
+                    (pair, seed)
+                })
                 .filter(|pair| options.pair_is_better(&pair.0, &best_so_far.read()))
                 .for_each(|pair| better_tx.send(pair).unwrap());
         })
@@ -122,11 +138,11 @@ fn main() {
 struct Candidate {
     address: String,
     pair: Pair,
-    secret: Secret,
+    seed: String,
 }
 
 impl Candidate {
     fn display(&self) {
-        println!("{} -> {}", self.address, hex::encode(self.secret));
+        println!("{} -> {}", self.address, self.seed);
     }
 }
