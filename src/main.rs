@@ -138,10 +138,12 @@ fn main() {
         .filter(|pair| options.pair_is_better(&pair.0, &best_so_far.read()))
         .for_each(|pair| {
             let candidate = options.to_candidate(pair);
+            eprintln!("Found new best:");
             candidate.display();
 
             if options.is_perfect_match(&candidate) {
                 should_continue.store(false, Ordering::Relaxed);
+                println!("{}", candidate.seed);
             }
 
             let mut write_txn = best_so_far.write();
@@ -160,6 +162,6 @@ struct Candidate {
 
 impl Candidate {
     fn display(&self) {
-        println!("{}\n    {}", self.address, self.seed);
+        eprintln!("{}\n    {}", self.address, self.seed);
     }
 }
