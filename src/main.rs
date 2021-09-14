@@ -1,8 +1,7 @@
 use concread::CowCell;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sp_core::{
-    crypto::{AccountId32, Ss58AddressFormat, Ss58Codec},
-    sr25519::Pair,
+    crypto::{AccountId32, SecretStringError, Ss58AddressFormat, Ss58Codec},
     DeriveJunction, Pair as PairTrait,
 };
 use structopt::StructOpt;
@@ -22,29 +21,72 @@ struct Options {
 
     #[structopt(long, help = "Should we check for case")]
     only_case_sensitive: bool,
+
+    #[structopt(
+        long,
+        help = "Which scheme to generate keys for",
+        default_value = "Scheme::Sr25519(())"
+    )]
+    scheme: Scheme,
 }
 
-impl Options {
-    fn address(&self, pair: &Pair) -> String {
-        AccountId32::from(pair.public()).to_ss58check_with_version(Ss58AddressFormat::Custom(42))
-    }
+#[derive(Debug, Clone, Copy)]
+enum Scheme {
+    Sr25519,
+    Ed25519,
+}
 
-    pub fn to_candidate(&self, (pair, seed): (Pair, String)) -> Candidate {
-        Candidate {
-            address: self.address(&pair),
-            pair,
-            seed,
+impl std::str::FromStr for Scheme {
+    type Err = String;
+
+    fn from_str(scheme: &str) -> Result<Self, Self::Err> {
+        match scheme.to_lowercase().as_ref() {
+            "sr25519" => Ok(Scheme::Sr25519),
+            "eddsa" | "ed25519" => Ok(Scheme::Ed25519),
+            _ => Err(format!("Unrecognized Scheme: {}", scheme)),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum SchemedPair {
+    Sr25519(sp_core::sr25519::Pair),
+    Ed25519(sp_core::ed25519::Pair),
+}
+
+impl SchemedPair {
+    fn account_id(&self) -> AccountId32 {
+        match self {
+            SchemedPair::Sr25519(p) => AccountId32::from(p.public()),
+            SchemedPair::Ed25519(p) => AccountId32::from(p.public()),
         }
     }
 
-    pub fn pair_is_better(&self, pair: &Pair, best_so_far: &Option<Candidate>) -> bool {
+    fn derive(&self, n: u64) -> Self {
+        match &self {
+            SchemedPair::Sr25519(p) => SchemedPair::Sr25519(
+                p.derive(core::iter::once(DeriveJunction::hard(n)), None)
+                    .unwrap_or_else(|infallible| match infallible {})
+                    .0,
+            ),
+            SchemedPair::Ed25519(p) => SchemedPair::Ed25519(
+                p.derive(core::iter::once(DeriveJunction::hard(n)), None)
+                    .unwrap_or_else(|_| unreachable!("known no soft junctions"))
+                    .0,
+            ),
+        }
+    }
+}
+
+impl Options {
+    pub fn is_better(&self, candidate: &Candidate, best_so_far: &Option<Candidate>) -> bool {
         match best_so_far {
-            Some(b) => self.is_better(&self.address(pair), &b.address),
+            Some(b) => self.str_is_better(&candidate.address, &b.address),
             None => true,
         }
     }
 
-    pub fn is_better(&self, new: &str, old: &str) -> bool {
+    pub fn str_is_better(&self, new: &str, old: &str) -> bool {
         match self
             .loose_prefix_match(new)
             .cmp(&self.loose_prefix_match(old))
@@ -96,19 +138,15 @@ fn main() {
     let best_so_far = Arc::new(CowCell::new(None));
     let (better_tx, better_rx) = mpsc::sync_channel(10);
 
+    let base_candidate =
+        Candidate::base(options.scheme, &options.seed_prefix, rand::random()).unwrap();
+
     let thread = {
         let best_so_far = best_so_far.clone();
         let better_tx = better_tx.clone();
         let options = options.clone();
         let should_continue = should_continue.clone();
         std::thread::spawn(move || {
-            let base_secret = rand::random::<[u64; 3]>();
-            let base_seed = format!(
-                "{}/{}/{}/{}",
-                &options.seed_prefix, base_secret[0], base_secret[1], base_secret[2]
-            );
-            let base_pair = Pair::from_string(&base_seed, None).unwrap();
-
             let n_offset = rand::random::<u64>();
             (0..u64::MAX)
                 .into_par_iter()
@@ -117,27 +155,17 @@ fn main() {
                     false => None,
                 })
                 .while_some()
-                .map(|n| {
-                    let derived = base_pair
-                        .derive(core::iter::once(DeriveJunction::soft(n)), None)
-                        .unwrap()
-                        .0;
-                    (derived, n)
-                })
-                .filter(|pair| options.pair_is_better(&pair.0, &best_so_far.read()))
-                .for_each(|(pair, n)| {
-                    let seed = format!("{}/{}", base_seed, n);
-                    better_tx.send((pair, seed)).unwrap()
-                });
+                .map(|n| base_candidate.derive(n))
+                .filter(|candidate| options.is_better(&candidate, &best_so_far.read()))
+                .for_each(|candidate| better_tx.send(candidate).unwrap());
         })
     };
     drop(better_tx);
 
     better_rx
         .iter()
-        .filter(|pair| options.pair_is_better(&pair.0, &best_so_far.read()))
-        .for_each(|pair| {
-            let candidate = options.to_candidate(pair);
+        .filter(|candidate| options.is_better(&candidate, &best_so_far.read()))
+        .for_each(|candidate| {
             eprintln!("Found new best:");
             candidate.display();
 
@@ -156,12 +184,43 @@ fn main() {
 #[derive(Clone)]
 struct Candidate {
     address: String,
-    pair: Pair,
+    pair: SchemedPair,
     seed: String,
 }
 
 impl Candidate {
     fn display(&self) {
         eprintln!("{}\n    {}", self.address, self.seed);
+    }
+
+    fn base(scheme: Scheme, seed: &str, secret: [u64; 3]) -> Result<Self, SecretStringError> {
+        let seed = format!("{}//{}//{}//{}", &seed, secret[0], secret[1], secret[2]);
+
+        let pair = match scheme {
+            Scheme::Sr25519 => {
+                SchemedPair::Sr25519(sp_core::sr25519::Pair::from_string(&seed, None)?)
+            }
+            Scheme::Ed25519 => {
+                SchemedPair::Ed25519(sp_core::ed25519::Pair::from_string(&seed, None)?)
+            }
+        };
+
+        Ok(Candidate::new(pair, seed))
+    }
+
+    fn new(pair: SchemedPair, seed: String) -> Candidate {
+        Candidate {
+            address: pair
+                .account_id()
+                .to_ss58check_with_version(Ss58AddressFormat::Custom(42)),
+            pair,
+            seed,
+        }
+    }
+
+    fn derive(&self, n: u64) -> Candidate {
+        let new_pair = self.pair.derive(n);
+        let seed = format!("{}//{}", self.seed, n);
+        Candidate::new(new_pair, seed)
     }
 }
