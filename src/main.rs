@@ -25,7 +25,7 @@ struct Options {
     #[structopt(
         long,
         help = "Which scheme to generate keys for",
-        default_value = "Scheme::Sr25519(())"
+        default_value = "Sr25519"
     )]
     scheme: Scheme,
 }
