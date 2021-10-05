@@ -134,6 +134,7 @@ fn main() {
     let options = Arc::new(Options::from_args());
 
     let should_continue = Arc::new(AtomicBool::new(true));
+    let throughput = Arc::new(Throughput::default());
 
     let best_so_far = Arc::new(CowCell::new(None));
     let (better_tx, better_rx) = mpsc::sync_channel(10);
@@ -146,6 +147,7 @@ fn main() {
         let better_tx = better_tx.clone();
         let options = options.clone();
         let should_continue = should_continue.clone();
+        let throughput = throughput.clone();
         std::thread::spawn(move || {
             let n_offset = rand::random::<u64>();
             (0..u64::MAX)
@@ -155,6 +157,7 @@ fn main() {
                     false => None,
                 })
                 .while_some()
+                .inspect(|_| throughput.increment())
                 .map(|n| base_candidate.derive(n))
                 .filter(|candidate| options.is_better(&candidate, &best_so_far.read()))
                 .for_each(|candidate| better_tx.send(candidate).unwrap());
@@ -162,12 +165,27 @@ fn main() {
     };
     drop(better_tx);
 
+    let monitor_thread = {
+        let throughput = throughput.clone();
+        let should_continue = should_continue.clone();
+        std::thread::spawn(move || {
+            if !atty::is(atty::Stream::Stdout) {
+                return;
+            }
+
+            while should_continue.load(Ordering::Relaxed) {
+                eprint!("\rAddresses: {} / s", throughput.take());
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+    };
+
     better_rx
         .iter()
         .filter(|candidate| options.is_better(&candidate, &best_so_far.read()))
         .for_each(|candidate| {
-            eprintln!("Found new best:");
-            candidate.display();
+            eprintln!("\rFound new best:               ");
+            eprintln!("{}\n    {}", candidate.address, candidate.seed);
 
             if options.is_perfect_match(&candidate) {
                 should_continue.store(false, Ordering::Relaxed);
@@ -179,6 +197,7 @@ fn main() {
             write_txn.commit();
         });
     thread.join().unwrap();
+    monitor_thread.join().unwrap();
 }
 
 #[derive(Clone)]
@@ -189,10 +208,6 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn display(&self) {
-        eprintln!("{}\n    {}", self.address, self.seed);
-    }
-
     fn base(scheme: Scheme, seed: &str, secret: [u64; 3]) -> Result<Self, SecretStringError> {
         let seed = format!("{}//{}//{}//{}", &seed, secret[0], secret[1], secret[2]);
 
@@ -222,5 +237,20 @@ impl Candidate {
         let new_pair = self.pair.derive(n);
         let seed = format!("{}//{}", self.seed, n);
         Candidate::new(new_pair, seed)
+    }
+}
+
+#[derive(Default)]
+struct Throughput {
+    count: std::sync::atomic::AtomicU64,
+}
+
+impl Throughput {
+    fn take(&self) -> u64 {
+        self.count.fetch_min(0, Ordering::Relaxed)
+    }
+
+    fn increment(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
     }
 }
