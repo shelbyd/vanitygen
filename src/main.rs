@@ -16,7 +16,7 @@ struct Options {
     #[structopt(long, help = "Desired prefix of the address")]
     prefix: String,
 
-    #[structopt(long, help = "Prefix for the secret seed", default_value = "//")]
+    #[structopt(long, help = "Prefix for the secret seed", default_value = "")]
     seed_prefix: String,
 
     #[structopt(long, help = "Should we check for case")]
@@ -149,8 +149,8 @@ fn main() {
         let should_continue = should_continue.clone();
         let throughput = throughput.clone();
         std::thread::spawn(move || {
-            let n_offset = rand::random::<u64>();
-            (0..u64::MAX)
+            let n_offset = rand::random::<u32>();
+            (0..u32::MAX)
                 .into_par_iter()
                 .map(|n| match should_continue.load(Ordering::Relaxed) {
                     true => Some(n.wrapping_add(n_offset)),
@@ -208,8 +208,13 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn base(scheme: Scheme, seed: &str, secret: [u64; 3]) -> Result<Self, SecretStringError> {
-        let seed = format!("{}//{}//{}//{}", &seed, secret[0], secret[1], secret[2]);
+    fn base(scheme: Scheme, seed: &str, secret: [u32; 7]) -> Result<Self, SecretStringError> {
+        let bytes_suffix = secret
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("//");
+        let seed = format!("{}//{}", &seed, bytes_suffix);
 
         let pair = match scheme {
             Scheme::Sr25519 => {
@@ -233,8 +238,8 @@ impl Candidate {
         }
     }
 
-    fn derive(&self, n: u64) -> Candidate {
-        let new_pair = self.pair.derive(n);
+    fn derive(&self, n: u32) -> Candidate {
+        let new_pair = self.pair.derive(n.into());
         let seed = format!("{}//{}", self.seed, n);
         Candidate::new(new_pair, seed)
     }
