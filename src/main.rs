@@ -12,7 +12,16 @@ use std::sync::{
 };
 
 #[derive(StructOpt, Debug)]
-struct Options {
+enum Command {
+    /// Generate a private key with a prefixed public key
+    Gen(GenOptions),
+
+    /// Create a public key (WITH NO PRIVATE KEY)
+    CreatePublic(CreatePublicOptions),
+}
+
+#[derive(StructOpt, Debug)]
+struct GenOptions {
     #[structopt(long, help = "Desired prefix of the address")]
     prefix: String,
 
@@ -34,6 +43,19 @@ struct Options {
 enum Scheme {
     Sr25519,
     Ed25519,
+}
+
+#[derive(StructOpt, Debug)]
+struct CreatePublicOptions {
+    #[structopt(long, help = "Desired prefix of the address")]
+    prefix: String,
+
+    #[structopt(
+        long,
+        help = "Fill remaining space with this string repeated",
+        default_value = "x"
+    )]
+    fill_with: String,
 }
 
 impl std::str::FromStr for Scheme {
@@ -78,7 +100,7 @@ impl SchemedPair {
     }
 }
 
-impl Options {
+impl GenOptions {
     pub fn is_better(&self, candidate: &Candidate, best_so_far: &Option<Candidate>) -> bool {
         match best_so_far {
             Some(b) => self.str_is_better(&candidate.address, &b.address),
@@ -131,7 +153,14 @@ fn matching_prefix_length(a: &str, b: &str) -> usize {
 }
 
 fn main() {
-    let options = Arc::new(Options::from_args());
+    match Command::from_args() {
+        Command::Gen(o) => gen_main(o),
+        Command::CreatePublic(o) => create_public_main(o),
+    }
+}
+
+fn gen_main(options: GenOptions) {
+    let options = Arc::new(options);
 
     let should_continue = Arc::new(AtomicBool::new(true));
     let throughput = Arc::new(Throughput::default());
@@ -258,4 +287,59 @@ impl Throughput {
     fn increment(&self) {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+fn create_public_main(options: CreatePublicOptions) {
+    let bytes_to_string = |bytes: [u8; 32]| AccountId32::new(bytes).to_ss58check();
+
+    let mut target = options.prefix.clone();
+    let mut bytes = [0u8; 32];
+    while target.len() < bytes_to_string(bytes).len() {
+        target += &options.fill_with;
+    }
+
+    for which_byte in 0..32 {
+        let byte = largest_byte_with(|b| {
+            bytes[which_byte] = b;
+            bytes_to_string(bytes) < target
+        });
+        bytes[which_byte] = byte.expect(&format!(
+            "Could not find AccountID with prefix {}",
+            &options.prefix
+        ));
+    }
+
+    assert!(
+        bytes_to_string(bytes).starts_with(&options.prefix),
+        "Could not find AccountID with prefix {}",
+        &options.prefix
+    );
+
+    println!("AccountID: 0x{}", hex::encode(bytes));
+    println!("Base58Check: {}", bytes_to_string(bytes));
+}
+
+fn largest_byte_with(mut pred: impl FnMut(u8) -> bool) -> Option<u8> {
+    if !pred(0) {
+        return None;
+    }
+    if pred(255) {
+        return Some(255);
+    }
+
+    let mut max_passing = 0;
+    let mut min_failing = 255;
+
+    while min_failing - max_passing > 1 {
+        let mid = core::cmp::max(max_passing / 2 + min_failing / 2, max_passing + 1);
+        assert!(mid > max_passing);
+
+        if pred(mid) {
+            max_passing = mid;
+        } else {
+            min_failing = mid;
+        }
+    }
+
+    Some(max_passing)
 }
