@@ -2,6 +2,10 @@
 
 Generate vanity addresses performantly for Substrate chains. Currently does about 125K keys / s on my mediocre laptop. Should scale linearly with available cores.
 
+## Installation
+
+Install Rust at [rustup.rs](https://rustup.rs). Install vanitygen with `cargo install --git https://github.com/shelbyd/vanitygen`.
+
 ## Usage
 
 To generate a private key with a matching public key.
